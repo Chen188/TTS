@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of
+# this software and associated documentation files (the "Software"), to deal in
+# the Software without restriction, including without limitation the rights to
+# use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+# the Software, and to permit persons to whom the Software is furnished to do so.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+# FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+# COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+# IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+"""uvicorn main module"""
+import time
+import os
+import subprocess
+import signal
+import uvicorn
+import sys
+import sagemaker_ssh_helper
+
+os.environ["COQUI_TOS_AGREED"] = "1"
+
+#    ###for debug only#######
+sys.path.append(os.path.join(os.path.dirname(__file__), "lib"))
+sagemaker_ssh_helper.setup_and_start_ssh()
+
+
+def _add_sigterm_handler(mms_process):
+    def _terminate(signo, frame):  # pylint: disable=unused-argument
+        try:
+            os.system('ps aux')
+            os.kill(mms_process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    signal.signal(signal.SIGTERM, _terminate)
+
+
+def download_s3_data(s3_path, local_path):
+    os.makedirs(local_path, exist_ok=True)
+    cmd = f"s5cmd sync {s3_path}* {local_path}"
+    subprocess.run(cmd, shell=True, check=True)
+
+
+custom_model_path = os.environ.get("CUSTOM_MODEL_PATH", "tts_models/multilingual/multi-dataset/xtts_v2")
+
+if custom_model_path.startswith('s3://'):
+    local_model_path = '/root/.local/'
+    if not custom_model_path.endswith('/'):
+        custom_model_path += '/'
+
+    download_s3_data(custom_model_path, local_model_path)
+    custom_model_path = local_model_path
+
+cmd = ["python3", "/root/TTS/server/server.py", "--model_name",
+       custom_model_path, "--use_cuda", "1", "--port", "8080"]
+process = subprocess.Popen(cmd)
+process.wait()

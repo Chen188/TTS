@@ -1,4 +1,9 @@
 #!flask/bin/python
+import time
+import boto3
+from numba import jit
+import numpy as np
+import hashlib
 import argparse
 import io
 import json
@@ -9,7 +14,8 @@ from threading import Lock
 from typing import Union
 from urllib.parse import parse_qs
 
-from flask import Flask, render_template, render_template_string, request, send_file
+from flask import Flask, render_template, render_template_string, request, \
+        send_file, stream_with_context, Response
 
 from TTS.config import load_config
 from TTS.utils.manage import ModelManager
@@ -85,6 +91,9 @@ if args.list_models:
 # CASE2: load pre-trained model paths
 if args.model_name is not None and not args.model_path:
     model_path, config_path, model_item = manager.download_model(args.model_name)
+    if not config_path:
+        config_path = model_path + '/config.json'
+
     args.vocoder_name = model_item["default_vocoder"] if args.vocoder_name is None else args.vocoder_name
 
 if args.vocoder_name is not None and not args.vocoder_path:
@@ -100,6 +109,9 @@ if args.vocoder_path is not None:
     vocoder_path = args.vocoder_path
     vocoder_config_path = args.vocoder_config_path
 
+print('model_path:', model_path)
+print('config_path:', config_path)
+print('speakers_file_path:', speakers_file_path)
 # load models
 synthesizer = Synthesizer(
     tts_checkpoint=model_path,
@@ -206,9 +218,149 @@ def tts():
     return send_file(out, mimetype="audio/wav")
 
 
+# Amazon SageMaker compatibility layer
+references = {}
+frame_bytes_10ms = 24000 * 1 * 2 // 100  # sample_rate * channel_num * bytes_per_sample // 100
+
+
+def get_bucket_and_key(s3uri):
+    """
+    get_bucket_and_key is helper function
+    """
+    pos = s3uri.find('/', 5)
+    bucket = s3uri[5: pos]
+    key = s3uri[pos + 1:]
+    return bucket, key
+
+
+def download_s3_wav(source_s3_url, local_file_path):
+    s3 = boto3.client('s3')
+    bucket_name, s3_file_path = get_bucket_and_key(source_s3_url)
+    # 下载文件
+    try:
+        if os.path.exists(local_file_path):
+            return
+
+        s3.download_file(bucket_name, s3_file_path, local_file_path)
+        print(f's3 wav file {s3_file_path} saved to {local_file_path}')
+    except Exception as e:
+        print(f's3 wav file download failed: {e}')
+
+
+@jit(nopython=True)
+def process_audio(wav):
+    wav = np.clip(wav, -1, 1)
+    return (wav * 32767).astype(np.int16)
+
+
+def get_latent_and_embedding(speaker_wav=None, speaker_name=None):
+    if speaker_wav:  # mannual set speakers
+        for idx, wav_file in enumerate(speaker_wav):
+            if wav_file.startswith("s3://"):
+                file_name_hash = hashlib.sha1(wav_file.encode('utf-8')).digest().hex()
+                local_file_name = f'/tmp/{file_name_hash}_{wav_file.split("/")[-1]}'
+                download_s3_wav(wav_file, local_file_name)
+                speaker_wav[idx] = local_file_name
+
+        speaker_wav_str = '__'.join(speaker_wav)
+        cached_speaker_wav = references.get(speaker_wav_str, {})
+        # should limit cached count
+        if not cached_speaker_wav:
+            gpt_cond_latent, speaker_embedding = synthesizer.tts_model.get_conditioning_latents(audio_path=speaker_wav)
+            references[speaker_wav_str] = {
+                "gpt_cond_latent": gpt_cond_latent,
+                "speaker_embedding": speaker_embedding
+            }
+        else:
+            gpt_cond_latent = cached_speaker_wav["gpt_cond_latent"]
+            speaker_embedding = cached_speaker_wav["speaker_embedding"]
+    else:  # get speaker by speaker name
+        if synthesizer.tts_config.model == "xtts":
+            speaker_id = synthesizer.tts_model.speaker_manager.name_to_id[speaker_name]
+        else:
+            # defaults to the first speaker
+            speaker_id = list(synthesizer.tts_model.speaker_manager.name_to_id.values())[0]
+        gpt_cond_latent, speaker_embedding = synthesizer.speaker_manager.speakers[speaker_id].values()
+
+    return gpt_cond_latent, speaker_embedding
+
+
+@app.route('/ping', methods=["GET", "POST"])
+def ping():
+    return "ok", 200
+
+
+@app.route('/invocations', methods=["POST"])
+def invocations():
+    with lock:
+        data = request.json
+        print(data)
+
+        text = data.get("text", "")
+        speaker_name = data.get("speaker_name", "")
+        speaker_wav = data.get("speaker_wav", [])  # reference wav
+        language_idx = data.get("language_id", "")  # en, zh, etc..
+        temperature = data.get("temperature", 0.75)
+        top_k = data.get("top_k", 50)
+        top_p = data.get("top_p", 0.85)
+        speed = data.get("speed", 1.0)
+        style_wav = data.get("style_wav", "")
+        style_wav = style_wav_uri_to_dict(style_wav)
+
+        if not (speaker_wav or speaker_name):
+            return "should specify 'speaker_wav' or 'speaker_name'", 400
+
+        if not (language_idx):
+            return "should specify 'language_id'", 400
+
+        if isinstance(speaker_wav, str):
+            speaker_wav = speaker_wav.split(',')
+
+        try:
+            gpt_cond_latent, speaker_embedding = get_latent_and_embedding(speaker_wav, speaker_name)
+        except Exception as e:
+            return f"An unexpected error occurred: {e}", 400
+
+        print(f" > Model input: {text}")
+        print(f" > Speaker wav: {speaker_wav}")
+        print(f" > Speaker Name: {speaker_name}")
+        print(f" > Language Idx: {language_idx}")
+
+        t0 = time.time()
+
+        @stream_with_context
+        def generate():
+            chunks = synthesizer.tts_model.inference_stream(
+                text,
+                language_idx,
+                gpt_cond_latent,
+                speaker_embedding,
+                stream_chunk_size=20,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                speed=speed,
+            )
+
+            for i, chunk in enumerate(chunks):
+                if i == 0:
+                    print(f"Time to first chunck: {time.time() - t0}")
+                # print(f"Received chunk {i} of audio length {chunk.shape[-1]}")
+                wav = chunk.clone().detach().cpu().numpy()
+                wav = wav[None, : int(wav.shape[0])]
+                wav = process_audio(wav)
+                wav = wav.tobytes()
+
+                for i in range(0, len(wav), frame_bytes_10ms):
+                    chunk = wav[i:i + frame_bytes_10ms]
+                    yield chunk
+
+                # wav_chuncks.append(chunk)
+
+        return Response(generate(), mimetype="audio/wav")
+
+
 # Basic MaryTTS compatibility layer
-
-
 @app.route("/locales", methods=["GET"])
 def mary_tts_api_locales():
     """MaryTTS-compatible /locales endpoint"""
