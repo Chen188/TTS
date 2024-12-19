@@ -45,7 +45,8 @@ def download_s3_data(s3_path, local_path):
     subprocess.run(cmd, shell=True, check=True)
 
 
-use_deepspeed = os.environ.get("USE_DEEPSPEED", "1")
+# this requires deepspeed, should build dockerfile-sagemaker-ds
+use_deepspeed = os.environ.get("USE_DEEPSPEED", "0")
 custom_model_path = os.environ.get("CUSTOM_MODEL_PATH", "tts_models/multilingual/multi-dataset/xtts_v2")
 
 # config file path, relative to CUSTOM_MODEL_PATH, optional if using public model id

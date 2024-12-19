@@ -4,9 +4,9 @@ numpy>=1.24.3;python_version>"3.10"
 cython>=0.29.30
 scipy>=1.11.2
 
-# force using torch 2.1
-torch==2.1
-torchaudio
+# force using torch 2.2
+torch==2.2.0
+torchaudio==2.2.0
 soundfile>=0.12.0
 librosa>=0.10.0
 scikit-learn>=1.3.0
@@ -50,7 +50,7 @@ bnnumerizer
 bnunicodenormalizer
 #deps for tortoise
 einops>=0.6.0
-transformers==4.40.2
+transformers==4.37.2
 #deps for bark
 encodec>=0.1.1
 # deps for XTTS
@@ -58,9 +58,6 @@ unidecode>=1.3.2
 num2words
 spacy[ja]==3.7.6
 sagemaker_ssh_helper
-
-# for inference speed up
-deepspeed==0.10.3
 
 # s5cmd for faster s3 download
 s5cmd
