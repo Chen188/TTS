@@ -15,11 +15,9 @@
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """uvicorn main module"""
-import time
 import os
 import subprocess
 import signal
-import uvicorn
 import sys
 import sagemaker_ssh_helper
 
@@ -47,17 +45,37 @@ def download_s3_data(s3_path, local_path):
     subprocess.run(cmd, shell=True, check=True)
 
 
+use_deepspeed = os.environ.get("USE_DEEPSPEED", "1")
 custom_model_path = os.environ.get("CUSTOM_MODEL_PATH", "tts_models/multilingual/multi-dataset/xtts_v2")
 
+# config file path, relative to CUSTOM_MODEL_PATH, optional if using public model id
+custom_model_config_path = os.environ.get("CUSTOM_MODEL_CONFIG_PATH")
+
 if custom_model_path.startswith('s3://'):
-    local_model_path = '/root/.local/'
+    local_model_path = '/root/.local/xtts_model/'
     if not custom_model_path.endswith('/'):
         custom_model_path += '/'
 
     download_s3_data(custom_model_path, local_model_path)
     custom_model_path = local_model_path
 
-cmd = ["python3", "/root/TTS/server/server.py", "--model_name",
-       custom_model_path, "--use_cuda", "1", "--port", "8080"]
+    if not custom_model_config_path:
+        print('[WARN] env `CUSTOM_MODEL_CONFIG_PATH` is not specified, will fallback to `config.json`')
+        custom_model_config_path = local_model_path + 'config.json'
+
+    if not os.path.exists(custom_model_config_path):
+        print(f'[ERROR] {custom_model_config_path} not found')
+
+    cmd = ["python3", "/root/TTS/server/server.py",
+           "--model_path", custom_model_path,
+           "--config_path", custom_model_config_path,
+           "--use_deepspeed", use_deepspeed,
+           "--use_cuda", "1", "--port", "8080"]
+else:
+    cmd = ["python3", "/root/TTS/server/server.py",
+           "--model_name", custom_model_path,
+           "--use_deepspeed", use_deepspeed,
+           "--use_cuda", "1", "--port", "8080"]
+
 process = subprocess.Popen(cmd)
 process.wait()

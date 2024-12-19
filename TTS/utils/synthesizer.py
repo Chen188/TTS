@@ -38,6 +38,7 @@ class Synthesizer(nn.Module):
         model_dir: str = "",
         voice_dir: str = None,
         use_cuda: bool = False,
+        use_deepspeed: bool = False,
     ) -> None:
         """General 🐸 TTS interface for inference. It takes a tts and a vocoder
         model and synthesize speech from the provided text.
@@ -73,6 +74,7 @@ class Synthesizer(nn.Module):
         self.vc_checkpoint = vc_checkpoint
         self.vc_config = vc_config
         self.use_cuda = use_cuda
+        self.use_deepspeed = use_deepspeed
 
         self.tts_model = None
         self.vocoder_model = None
@@ -161,7 +163,8 @@ class Synthesizer(nn.Module):
         config = load_config(os.path.join(model_dir, "config.json"))
         self.tts_config = config
         self.tts_model = setup_tts_model(config)
-        self.tts_model.load_checkpoint(config, checkpoint_dir=model_dir, eval=True)
+        self.tts_model.load_checkpoint(config, checkpoint_dir=model_dir,
+                                       use_deepspeed=self.use_deepspeed, eval=True)
         if use_cuda:
             self.tts_model.cuda()
 
@@ -189,7 +192,8 @@ class Synthesizer(nn.Module):
         if not self.encoder_checkpoint:
             self._set_speaker_encoder_paths_from_tts_config()
 
-        self.tts_model.load_checkpoint(self.tts_config, tts_checkpoint, eval=True)
+        self.tts_model.load_checkpoint(self.tts_config, tts_checkpoint,
+                                       use_deepspeed=self.use_deepspeed, eval=True)
         if use_cuda:
             self.tts_model.cuda()
 
