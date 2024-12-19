@@ -11,3 +11,5 @@ COPY . /root
 ENV PATH="/root:${PATH}"
 
 RUN make install
+
+ENTRYPOINT /root/serve
